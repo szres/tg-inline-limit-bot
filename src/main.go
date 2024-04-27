@@ -50,7 +50,8 @@ func burnoutCheck(c tele.Context) error {
 		inlineCD[combinedID] = value
 	} else {
 		if value.Count >= 4 {
-			msg, err := bot.Send(c.Recipient(), fmt.Sprintf("[%s](tg://user?id=%d) %s", escape(fullName(c.Sender())), c.Sender().ID, escape("your inline message burned out! It may take significant time for resetting.")), tele.ModeMarkdownV2)
+			msg, err := bot.Send(c.Recipient(), fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)+
+				escape(fmt.Sprintf(", your inline message burned out! It may take significant time for resetting. %d minutes left.", value.Cooldown)), tele.ModeMarkdownV2)
 			if err == nil {
 				c.Delete()
 				go func() {
