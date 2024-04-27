@@ -28,7 +28,9 @@ var (
 	gRootID          int64
 	gKumaPushURL     string
 	gToken           string
-	gCooldownMinutes int = 240
+	gCooldownMinutes int           = 240
+	gBurnoutLimit    int           = 4
+	gWarningTimeout  time.Duration = 15 * time.Second
 )
 
 type InlineCooldown struct {
@@ -49,12 +51,13 @@ func burnoutCheck(c tele.Context) error {
 		value = InlineCooldown{gCooldownMinutes, 1}
 		inlineCD[combinedID] = value
 	} else {
-		if value.Count >= 4 {
-			msg, err := bot.Send(c.Recipient(), fmt.Sprintf("[%s](tg://user?id=%d) %s", escape(fullName(c.Sender())), c.Sender().ID, escape("your inline message burned out! It may take significant time for resetting.")), tele.ModeMarkdownV2)
+		if value.Count >= gBurnoutLimit {
+			msg, err := bot.Send(c.Recipient(), fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)+
+				escape(fmt.Sprintf(", your inline message burned out! It may take significant time for resetting. %d minutes left.", value.Cooldown)), tele.ModeMarkdownV2)
 			if err == nil {
 				c.Delete()
 				go func() {
-					timer := time.NewTimer(15 * time.Second)
+					timer := time.NewTimer(gWarningTimeout)
 					<-timer.C
 					bot.Delete(msg)
 				}()
