@@ -38,6 +38,7 @@ type InlineCooldown struct {
 	Count int
 }
 
+var bot *tele.Bot
 var db *scribble.Driver
 var inlineCD map[string]InlineCooldown
 
@@ -49,8 +50,16 @@ func burnoutCheck(c tele.Context) error {
 		inlineCD[combinedID] = value
 	} else {
 		if value.Count >= 4 {
-			c.Delete()
-			return c.Send(fmt.Sprintf("[%s](tg://user?id=%d) %s", escape(fullName(c.Sender())), c.Sender().ID, escape("your inline message burned out! It may take significant time for reset.")), tele.ModeMarkdownV2)
+			msg, err := bot.Send(c.Recipient(), fmt.Sprintf("[%s](tg://user?id=%d) %s", escape(fullName(c.Sender())), c.Sender().ID, escape("your inline message burned out! It may take significant time for resetting.")), tele.ModeMarkdownV2)
+			if err == nil {
+				c.Delete()
+				go func() {
+					timer := time.NewTimer(15 * time.Second)
+					<-timer.C
+					bot.Delete(msg)
+				}()
+			}
+			return err
 		} else {
 			value.Count++
 			inlineCD[combinedID] = value
@@ -120,39 +129,37 @@ func fullName(u *tele.User) string {
 }
 
 func main() {
-	var b *tele.Bot
-
 	pref := tele.Settings{
 		Token:  gToken,
 		Poller: &tele.LongPoller{Timeout: 5 * time.Second},
 	}
 	var err error
-	b, err = tele.NewBot(pref)
+	bot, err = tele.NewBot(pref)
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
 
-	b.Handle(tele.OnText, func(c tele.Context) error {
+	bot.Handle(tele.OnText, func(c tele.Context) error {
 		if c.Message().Via != nil {
 			return burnoutCheck(c)
 		}
 		return nil
 	})
-	b.Handle(tele.OnPhoto, func(c tele.Context) error {
+	bot.Handle(tele.OnPhoto, func(c tele.Context) error {
 		if c.Message().Via != nil {
 			return burnoutCheck(c)
 		}
 		return nil
 	})
 
-	go b.Start()
+	go bot.Start()
 
 	fmt.Println("bot online!")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, os.Interrupt, syscall.SIGTERM)
 	<-sc
-	b.Stop()
+	bot.Stop()
 	fmt.Println("before shutdown, backup data")
 	db.Write("data", "inline", inlineCD)
 	<-time.After(time.Second * 1)
