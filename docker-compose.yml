@@ -1,0 +1,18 @@
+version: '3'
+
+networks:
+  net:
+
+services:
+  app:
+    build: .
+    volumes:
+      - ./db:/db
+      - /etc/ssl/certs:/etc/ssl/certs
+    env_file:
+      - .env
+    restart: unless-stopped
+    ports:
+      - "80:11180"
+    networks:
+      - net
