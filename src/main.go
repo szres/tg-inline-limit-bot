@@ -33,58 +33,167 @@ var (
 	gWarningTimeout  time.Duration = 15 * time.Second
 )
 
-type InlineCooldown struct {
+type User struct {
+	Id string `json:"id"`
 	// Cooldown time left in minutes
-	Cooldown int
-	// Count of inline messages
-	Count int
+	Cooldown int `json:"cooldown"`
+	// Count of valid inline messages
+	Count int `json:"count"`
+}
+type Stat struct {
+	InlineCount int
+	ChatCount   int
+	BlockCount  int
+}
+type GroupSetup struct {
+	reserve int
+}
+
+type GroupStat struct {
+	Id          string     `json:"gid"`
+	InlineCount int        `json:"inlinecount"`
+	ChatCount   int        `json:"chatcount"`
+	BlockCount  int        `json:"blockcount"`
+	Setup       GroupSetup `json:"setup"`
+	Users       []User     `json:"users"`
+}
+
+func (g *GroupStat) NewUser(id string) {
+	g.Users = append(g.Users, User{Id: id, Count: 0, Cooldown: gCooldownMinutes})
+}
+
+func (g *GroupStat) FindUser(id string) int {
+	for k, v := range g.Users {
+		if v.Id == id {
+			return k
+		}
+	}
+	g.NewUser(id)
+	return len(g.Users) - 1
+}
+
+func (g *GroupStat) StatOnMsgType(t string) {
+	switch t {
+	case "inline":
+		g.InlineCount++
+	case "chat":
+		g.ChatCount++
+	case "block":
+		g.BlockCount++
+	}
+}
+
+func (g *GroupStat) StatReset() {
+	g.InlineCount = 0
+	g.ChatCount = 0
+	g.BlockCount = 0
+}
+func (g *GroupStat) StatOnMsg(c tele.Context) error {
+	uid := strconv.FormatInt(c.Sender().ID, 10)
+	uk := g.FindUser(uid)
+	if c.Message().Via != nil {
+		fmt.Printf("[%s:%s][MSG] Type:inline From:@%s\n", g.Id, uid, c.Message().Via.Username)
+		g.Users[uk].Count++
+		if g.Users[uk].Count == 1 {
+			g.Users[uk].Cooldown = gCooldownMinutes
+		}
+		if g.Users[uk].Count > gBurnoutLimit {
+			fmt.Println("\t\t--BLOCKED--")
+			g.StatOnMsgType("block")
+			c.Delete()
+			go sendSelfDestroyMsg(c.Recipient(), fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)+
+				escape(fmt.Sprintf(", your inline message burned out! It may take significant time for resetting. %d minutes left.", g.Users[uk].Cooldown)), gWarningTimeout)
+		} else {
+			fmt.Println("\t\t--ALLOWED--")
+			g.StatOnMsgType("inline")
+		}
+		// msgPrint(c)
+	} else {
+		g.StatOnMsgType("chat")
+	}
+	return nil
 }
 
 var bot *tele.Bot
 var db *scribble.Driver
-var inlineCD map[string]InlineCooldown
+var inlineStats []GroupStat
 
-func burnoutCheck(c tele.Context) error {
-	combinedID := strconv.FormatInt(c.Chat().ID, 10) + ":" + strconv.FormatInt(c.Sender().ID, 10)
-	value, ok := inlineCD[combinedID]
-	if !ok {
-		value = InlineCooldown{gCooldownMinutes, 1}
-		inlineCD[combinedID] = value
-	} else {
-		if value.Count >= gBurnoutLimit {
-			msg, err := bot.Send(c.Recipient(), fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)+
-				escape(fmt.Sprintf(", your inline message burned out! It may take significant time for resetting. %d minutes left.", value.Cooldown)), tele.ModeMarkdownV2)
-			if err == nil {
-				c.Delete()
-				go func() {
-					timer := time.NewTimer(gWarningTimeout)
-					<-timer.C
-					bot.Delete(msg)
-				}()
-			}
-			return err
-		} else {
-			value.Count++
-			inlineCD[combinedID] = value
+func newGroup(gid string) GroupStat {
+	return GroupStat{
+		Id:          gid,
+		InlineCount: 0,
+		ChatCount:   0,
+		BlockCount:  0,
+		Users:       make([]User, 0),
+	}
+}
+func findGroup(gid string) int {
+	for k, v := range inlineStats {
+		if v.Id == gid {
+			return k
 		}
 	}
-	return nil
+	inlineStats = append(inlineStats, newGroup(gid))
+	return len(inlineStats) - 1
+}
+
+func sendSelfDestroyMsg(to tele.Recipient, what interface{}, timeout time.Duration) error {
+	msg, err := bot.Send(to, what, tele.ModeMarkdownV2)
+	if err == nil {
+		go func() {
+			timer := time.NewTimer(timeout)
+			<-timer.C
+			bot.Delete(msg)
+		}()
+	}
+	return err
+}
+
+func msgPrint(c tele.Context) {
+	gid := strconv.FormatInt(c.Chat().ID, 10)
+	uid := strconv.FormatInt(c.Sender().ID, 10)
+	gk := findGroup(gid)
+	for _, u := range inlineStats[gk].Users {
+		if u.Id == uid {
+			fmt.Printf("GROUP %s USER %s - n:%d cd:%d\n", gid, uid, u.Count, u.Cooldown)
+			return
+		}
+	}
+	fmt.Println("[ERROR] USER NOT FOUND")
+}
+
+func msgHandler(c tele.Context) error {
+	gid := strconv.FormatInt(c.Chat().ID, 10)
+	gkey := findGroup(gid)
+	return inlineStats[gkey].StatOnMsg(c)
 }
 
 func inlineCooldownRoutine() {
 	interval := time.NewTicker(1 * time.Minute)
 	defer interval.Stop()
 	for range interval.C {
-		keysToRemove := make([]string, 0)
-		for k, v := range inlineCD {
-			v.Cooldown--
-			inlineCD[k] = v
-			if v.Cooldown <= 0 {
-				keysToRemove = append(keysToRemove, k)
+		for gk, group := range inlineStats {
+			for uk, user := range group.Users {
+				if user.Cooldown > 0 {
+					user.Cooldown--
+					if user.Cooldown <= 0 {
+						user.Count = 0
+					}
+					inlineStats[gk].Users[uk] = user
+				}
 			}
 		}
-		for _, k := range keysToRemove {
-			delete(inlineCD, k)
+		if time.Now().Hour() == 23 && time.Now().Minute() == 55 {
+			go func() {
+				for k, group := range inlineStats {
+					if group.InlineCount > 0 {
+						gid, _ := strconv.ParseInt(group.Id, 10, 64)
+						sendSelfDestroyMsg(tele.ChatID(gid), escape(fmt.Sprintf("In the past 24 hours, there are total %d msgs handled by this bot.\nIn the handled msgs, there are:\n%d inline msgs sent\n%d inline msgs been blocked", group.InlineCount+group.ChatCount, group.InlineCount, group.BlockCount)), 60*time.Second)
+					}
+					inlineStats[k].StatReset()
+					time.Sleep(time.Millisecond * 200)
+				}
+			}()
 		}
 	}
 }
@@ -92,8 +201,8 @@ func inlineCooldownRoutine() {
 func init() {
 	db, _ = scribble.New("../db", nil)
 	db.Read("test", "env", &testEnv)
-	inlineCD = make(map[string]InlineCooldown)
-	db.Read("data", "inline", &inlineCD)
+	inlineStats = make([]GroupStat, 0)
+	db.Read("data", "inline", &inlineStats)
 	go inlineCooldownRoutine()
 	if testEnv.Token != "" {
 		gToken = testEnv.Token
@@ -143,16 +252,11 @@ func main() {
 		return
 	}
 
-	bot.Handle(tele.OnText, func(c tele.Context) error {
-		if c.Message().Via != nil {
-			return burnoutCheck(c)
-		}
-		return nil
-	})
-	bot.Handle(tele.OnPhoto, func(c tele.Context) error {
-		if c.Message().Via != nil {
-			return burnoutCheck(c)
-		}
+	for _, v := range []string{tele.OnText, tele.OnPhoto, tele.OnAnimation, tele.OnDocument, tele.OnSticker, tele.OnVideo, tele.OnVoice} {
+		bot.Handle(v, msgHandler)
+	}
+	bot.Handle(tele.OnAddedToGroup, func(c tele.Context) error {
+		c.Send("My pleasure to join the group! Inline messages will be limited by me.")
 		return nil
 	})
 
@@ -164,7 +268,7 @@ func main() {
 	<-sc
 	bot.Stop()
 	fmt.Println("before shutdown, backup data")
-	db.Write("data", "inline", inlineCD)
+	db.Write("data", "inline", inlineStats)
 	<-time.After(time.Second * 1)
 	fmt.Println("bot offline!")
 }
