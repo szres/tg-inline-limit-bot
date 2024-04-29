@@ -185,7 +185,9 @@ func inlineCooldownRoutine() {
 		}
 		if time.Now().Hour() == 23 && time.Now().Minute() == 55 {
 			go func() {
+				fmt.Println("--- 24H SUMMARY ----------------")
 				for k, group := range inlineStats {
+					fmt.Printf("[%s] total:%d inline:%d block:%d\n", group.Id, group.ChatCount+group.InlineCount, group.InlineCount, group.BlockCount)
 					if group.InlineCount > 0 {
 						gid, _ := strconv.ParseInt(group.Id, 10, 64)
 						sendSelfDestroyMsg(tele.ChatID(gid), escape(fmt.Sprintf("In the past 24 hours, there are total %d msgs handled by this bot.\nIn the handled msgs, there are:\n%d inline msgs sent\n%d inline msgs been blocked", group.InlineCount+group.ChatCount, group.InlineCount, group.BlockCount)), 60*time.Second)
