@@ -101,8 +101,9 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 			fmt.Println("\t\t--BLOCKED--")
 			g.StatOnMsgType("block")
 			c.Delete()
-			go sendSelfDestroyMsg(c.Recipient(), fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)+
-				escape(fmt.Sprintf(", your inline message burned out! It may take significant time for resetting. %d minutes left.", g.Users[uk].Cooldown)), gWarningTimeout)
+			name := fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)
+			warning := escape(fmt.Sprintf("your inline message burned out! It may take significant time for resetting. %d minutes left.", g.Users[uk].Cooldown))
+			sendSelfDestroyMsg(c.Recipient(), name+", "+warning, gWarningTimeout)
 		} else {
 			fmt.Println("\t\t--ALLOWED--")
 			g.StatOnMsgType("inline")
@@ -112,6 +113,46 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 		g.StatOnMsgType("chat")
 	}
 	return nil
+}
+
+type MsgWithTimeout struct {
+	Msg  tele.StoredMessage `json:"msg"`
+	Time time.Time          `json:"time"`
+}
+
+var msgs2Delete []MsgWithTimeout
+
+func deleteAfter(msg tele.Editable, timeout time.Duration) {
+	m, c := msg.MessageSig()
+	msgStore := tele.StoredMessage{MessageID: m, ChatID: c}
+	msgs2Delete = append(msgs2Delete, MsgWithTimeout{Msg: msgStore, Time: time.Now().Add(timeout)})
+	db.Write("data", "msg2delete", &msgs2Delete)
+}
+
+func msgDeleteTimer() {
+	interval := time.NewTicker(1 * time.Second)
+	defer interval.Stop()
+	for range interval.C {
+		isMsg2Delete := false
+		for _, msg := range msgs2Delete {
+			if msg.Time.Before(time.Now()) {
+				isMsg2Delete = true
+				break
+			}
+		}
+		if isMsg2Delete {
+			msgs2DeleteNew := make([]MsgWithTimeout, 0)
+			for _, m := range msgs2Delete {
+				if m.Time.Before(time.Now()) {
+					bot.Delete(m.Msg)
+				} else {
+					msgs2DeleteNew = append(msgs2DeleteNew, m)
+				}
+			}
+			msgs2Delete = msgs2DeleteNew
+			db.Write("data", "msg2delete", &msgs2Delete)
+		}
+	}
 }
 
 var bot *tele.Bot
@@ -140,11 +181,7 @@ func findGroup(gid string) int {
 func sendSelfDestroyMsg(to tele.Recipient, what interface{}, timeout time.Duration) error {
 	msg, err := bot.Send(to, what, tele.ModeMarkdownV2)
 	if err == nil {
-		go func() {
-			timer := time.NewTimer(timeout)
-			<-timer.C
-			bot.Delete(msg)
-		}()
+		deleteAfter(msg, timeout)
 	}
 	return err
 }
@@ -169,6 +206,7 @@ func msgHandler(c tele.Context) error {
 }
 
 func inlineCooldownRoutine() {
+	summarySentDay := -1
 	interval := time.NewTicker(1 * time.Minute)
 	defer interval.Stop()
 	for range interval.C {
@@ -183,14 +221,15 @@ func inlineCooldownRoutine() {
 				}
 			}
 		}
-		if time.Now().Hour() == 23 && time.Now().Minute() == 55 {
+		if time.Now().Day() != summarySentDay && time.Now().Hour() >= 23 && time.Now().Minute() >= 55 {
+			summarySentDay = time.Now().Day()
 			go func() {
 				fmt.Println("--- 24H SUMMARY ----------------")
 				for k, group := range inlineStats {
 					fmt.Printf("[%s] total:%d inline:%d block:%d\n", group.Id, group.ChatCount+group.InlineCount, group.InlineCount, group.BlockCount)
 					if group.InlineCount > 0 {
 						gid, _ := strconv.ParseInt(group.Id, 10, 64)
-						sendSelfDestroyMsg(tele.ChatID(gid), escape(fmt.Sprintf("In the past 24 hours, there are total %d msgs handled by this bot.\nIn the handled msgs, there are:\n%d inline msgs sent\n%d inline msgs been blocked", group.InlineCount+group.ChatCount, group.InlineCount, group.BlockCount)), 60*time.Second)
+						sendSelfDestroyMsg(tele.ChatID(gid), escape(fmt.Sprintf("In the past 24 hours, there are total %d msgs handled by this bot.\nIn the handled msgs, there are:\n%d inline msgs sent\n%d inline msgs been blocked", group.InlineCount+group.ChatCount, group.InlineCount, group.BlockCount)), 6*time.Hour)
 					}
 					inlineStats[k].StatReset()
 					time.Sleep(time.Millisecond * 200)
@@ -205,7 +244,8 @@ func init() {
 	db.Read("test", "env", &testEnv)
 	inlineStats = make([]GroupStat, 0)
 	db.Read("data", "inline", &inlineStats)
-	go inlineCooldownRoutine()
+	msgs2Delete = make([]MsgWithTimeout, 0)
+	db.Read("data", "msg2delete", &msgs2Delete)
 	if testEnv.Token != "" {
 		gToken = testEnv.Token
 		gRootID, _ = strconv.ParseInt(testEnv.AdminID, 10, 64)
@@ -263,6 +303,8 @@ func main() {
 	})
 
 	go bot.Start()
+	go msgDeleteTimer()
+	go inlineCooldownRoutine()
 
 	fmt.Println("bot online!")
 	sc := make(chan os.Signal, 1)
