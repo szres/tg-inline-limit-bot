@@ -92,7 +92,7 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 	uid := strconv.FormatInt(c.Sender().ID, 10)
 	uk := g.FindUser(uid)
 	if c.Message().Via != nil {
-		fmt.Printf("[%s:%s][MSG] Type:inline From:@%s\n", g.Id, uid, c.Message().Via.Username)
+		fmt.Printf("[%s][%s:%s][MSG] Type:inline From:@%s\n", time.Now().Format(gTimeFormat), g.Id, uid, c.Message().Via.Username)
 		g.Users[uk].Count++
 		if g.Users[uk].Count == 1 {
 			g.Users[uk].Cooldown = gCooldownMinutes
