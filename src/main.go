@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -23,8 +24,14 @@ type testenv struct {
 
 var testEnv testenv
 
+type BotStat struct {
+	LastSummarySentTime time.Time
+}
+
+var botStat BotStat
+
 var (
-	gTimeFormat      string = "2006-01-02 15:04"
+	gTimeFormat      string = "2006-01-02 15:04:05"
 	gRootID          int64
 	gKumaPushURL     string
 	gToken           string
@@ -192,7 +199,6 @@ func msgHandler(c tele.Context) error {
 }
 
 func inlineCooldownRoutine() {
-	summarySentDay := -1
 	interval := time.NewTicker(1 * time.Minute)
 	defer interval.Stop()
 	for range interval.C {
@@ -207,19 +213,22 @@ func inlineCooldownRoutine() {
 				}
 			}
 		}
-		if time.Now().Day() != summarySentDay && time.Now().Hour() >= 23 && time.Now().Minute() >= 55 {
-			summarySentDay = time.Now().Day()
+
+		if time.Now().After(botStat.LastSummarySentTime.Add(12*time.Hour)) && time.Now().Hour() >= 23 && time.Now().Minute() >= 30 {
 			go func() {
-				fmt.Println("--- 24H SUMMARY ----------------")
+				hours := int(math.Ceil(time.Since(botStat.LastSummarySentTime).Hours()))
+				fmt.Printf("--- %dH SUMMARY ----------------\n", hours)
 				for k, group := range inlineStats {
 					fmt.Printf("[%s] total:%d inline:%d block:%d\n", group.Id, group.ChatCount+group.InlineCount, group.InlineCount, group.BlockCount)
 					if group.InlineCount > 0 {
 						gid, _ := strconv.ParseInt(group.Id, 10, 64)
-						sendSelfDestroyMsg(tele.ChatID(gid), escape(fmt.Sprintf("In the past 24 hours, there are total %d msgs handled by this bot.\nIn the handled msgs, there are:\n%d inline msgs sent\n%d inline msgs been blocked", group.InlineCount+group.ChatCount, group.InlineCount, group.BlockCount)), 6*time.Hour)
+						sendSelfDestroyMsg(tele.ChatID(gid), fmt.Sprintf("In the past `%d` hours, there are `%d` msgs handled by this bot\\.\nIn the `%d` inline msgs, there are:\n`%d` allowed\n`%d` blocked", hours, group.InlineCount+group.BlockCount+group.ChatCount, group.InlineCount+group.BlockCount, group.InlineCount, group.BlockCount), 6*time.Hour)
 					}
 					inlineStats[k].StatReset()
 					time.Sleep(time.Millisecond * 200)
 				}
+				botStat.LastSummarySentTime = time.Now()
+				db.Write("data", "bot", &botStat)
 			}()
 		}
 	}
@@ -232,6 +241,11 @@ func init() {
 	db.Read("data", "inline", &inlineStats)
 	msgs2Delete = make([]MsgWithTimeout, 0)
 	db.Read("data", "msg2delete", &msgs2Delete)
+	db.Read("data", "bot", &botStat)
+	if botStat.LastSummarySentTime.IsZero() {
+		botStat.LastSummarySentTime = time.Now().Add(-12 * time.Hour)
+		db.Write("data", "bot", &botStat)
+	}
 	if testEnv.Token != "" {
 		gToken = testEnv.Token
 		gRootID, _ = strconv.ParseInt(testEnv.AdminID, 10, 64)
