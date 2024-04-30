@@ -108,7 +108,6 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 			fmt.Println("\t\t--ALLOWED--")
 			g.StatOnMsgType("inline")
 		}
-		// msgPrint(c)
 	} else {
 		g.StatOnMsgType("chat")
 	}
@@ -184,19 +183,6 @@ func sendSelfDestroyMsg(to tele.Recipient, what interface{}, timeout time.Durati
 		deleteAfter(msg, timeout)
 	}
 	return err
-}
-
-func msgPrint(c tele.Context) {
-	gid := strconv.FormatInt(c.Chat().ID, 10)
-	uid := strconv.FormatInt(c.Sender().ID, 10)
-	gk := findGroup(gid)
-	for _, u := range inlineStats[gk].Users {
-		if u.Id == uid {
-			fmt.Printf("GROUP %s USER %s - n:%d cd:%d\n", gid, uid, u.Count, u.Cooldown)
-			return
-		}
-	}
-	fmt.Println("[ERROR] USER NOT FOUND")
 }
 
 func msgHandler(c tele.Context) error {
