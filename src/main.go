@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	_ "time/tzdata"
+
 	kuma "github.com/Nigh/kuma-push"
 	scribble "github.com/nanobox-io/golang-scribble"
 	tele "gopkg.in/telebot.v3"
