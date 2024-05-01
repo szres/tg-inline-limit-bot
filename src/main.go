@@ -214,7 +214,8 @@ func inlineCooldownRoutine() {
 			}
 		}
 
-		if time.Now().After(botStat.LastSummarySentTime.Add(12*time.Hour)) && time.Now().Hour() >= 23 && time.Now().Minute() >= 30 {
+		if time.Now().After(botStat.LastSummarySentTime.Add(24*time.Hour)) ||
+			(time.Now().After(botStat.LastSummarySentTime.Add(12*time.Hour)) && time.Now().Hour() >= 23 && time.Now().Minute() >= 30) {
 			go func() {
 				hours := int(math.Ceil(time.Since(botStat.LastSummarySentTime).Hours()))
 				fmt.Printf("--- %dH SUMMARY ----------------\n", hours)
@@ -306,7 +307,7 @@ func main() {
 	go msgDeleteTimer()
 	go inlineCooldownRoutine()
 
-	fmt.Println("bot online!")
+	fmt.Printf("[%s] bot online!\n", time.Now().Format(gTimeFormat))
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, os.Interrupt, syscall.SIGTERM)
 	<-sc

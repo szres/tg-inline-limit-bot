@@ -1,8 +1,5 @@
 version: '3'
 
-networks:
-  net:
-
 services:
   app:
     build: .
@@ -12,7 +9,3 @@ services:
     env_file:
       - .env
     restart: unless-stopped
-    ports:
-      - "80:11180"
-    networks:
-      - net
