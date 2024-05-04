@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,13 +34,15 @@ type BotStat struct {
 var botStat BotStat
 
 var (
-	gTimeFormat      string = "2006-01-02 15:04:05"
-	gRootID          int64
-	gKumaPushURL     string
-	gToken           string
-	gCooldownMinutes int           = 240
-	gBurnoutLimit    int           = 4
-	gWarningTimeout  time.Duration = 15 * time.Second
+	gTimeFormat         string = "2006-01-02 15:04:05"
+	gRootID             int64
+	gKumaPushURL        string
+	gToken              string
+	gCooldownMinutesMin int           = 5
+	gCooldownMinutesMax int           = 1440
+	gBurnoutLimitMin    int           = 0
+	gBurnoutLimitMax    int           = 13
+	gWarningTimeout     time.Duration = 15 * time.Second
 )
 
 type User struct {
@@ -55,7 +58,13 @@ type Stat struct {
 	BlockCount  int
 }
 type GroupSetup struct {
-	reserve int
+	CooldownMinutes int
+	BurnoutLimit    int
+}
+
+var gDefaultSetup = GroupSetup{
+	CooldownMinutes: 240,
+	BurnoutLimit:    4,
 }
 
 type GroupStat struct {
@@ -68,7 +77,7 @@ type GroupStat struct {
 }
 
 func (g *GroupStat) NewUser(id string) {
-	g.Users = append(g.Users, User{Id: id, Count: 0, Cooldown: gCooldownMinutes})
+	g.Users = append(g.Users, User{Id: id, Count: 0, Cooldown: g.Setup.CooldownMinutes})
 }
 
 func (g *GroupStat) FindUser(id string) int {
@@ -92,6 +101,9 @@ func (g *GroupStat) StatOnMsgType(t string) {
 	}
 }
 
+func (g *GroupStat) Heatsink() {
+	g.Users = make([]User, 0)
+}
 func (g *GroupStat) StatReset() {
 	g.InlineCount = 0
 	g.ChatCount = 0
@@ -104,9 +116,9 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 		fmt.Printf("[%s][%s:%s][MSG] Type:inline From:@%s\n", time.Now().Format(gTimeFormat), g.Id, uid, c.Message().Via.Username)
 		g.Users[uk].Count++
 		if g.Users[uk].Count == 1 {
-			g.Users[uk].Cooldown = gCooldownMinutes
+			g.Users[uk].Cooldown = g.Setup.CooldownMinutes
 		}
-		if g.Users[uk].Count > gBurnoutLimit {
+		if g.Users[uk].Count > g.Setup.BurnoutLimit {
 			fmt.Println("\t\t--BLOCKED--")
 			g.StatOnMsgType("block")
 			c.Delete()
@@ -119,7 +131,42 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 		}
 	} else {
 		g.StatOnMsgType("chat")
+		g.OnChatMsg(c)
 	}
+	return nil
+}
+
+type SetupPending struct {
+	Gid     string
+	Uid     string
+	Timeout int
+}
+
+var setupPendings []SetupPending
+
+func (g *GroupStat) OnChatMsg(c tele.Context) error {
+	newSetupPendings := make([]SetupPending, 0)
+	for _, v := range setupPendings {
+		if v.Gid == g.Id && v.Uid == strconv.FormatInt(c.Sender().ID, 10) {
+			matchs := regexp.MustCompile(`^(\d+),\s?(\d+)$`).FindStringSubmatch(c.Text())
+			if len(matchs) > 0 {
+				burnout, err1 := strconv.Atoi(matchs[1])
+				cooldown, err2 := strconv.Atoi(matchs[2])
+				if err1 != nil || err2 != nil ||
+					burnout < gBurnoutLimitMin || burnout > gBurnoutLimitMax ||
+					cooldown < gCooldownMinutesMin || cooldown > gCooldownMinutesMax {
+					bot.Reply(c.Message(), escape("Invalid value."), tele.ModeMarkdownV2)
+					continue
+				}
+				g.Setup.BurnoutLimit = burnout
+				g.Setup.CooldownMinutes = cooldown
+				bot.Reply(c.Message(), fmt.Sprintf("Setup update successful\nNow, burnout is set to be triggered by sending more than `%d` inline messages in `%d` minutes", burnout, cooldown), tele.ModeMarkdownV2)
+			}
+		} else {
+			newSetupPendings = append(newSetupPendings, v)
+		}
+	}
+	setupPendings = newSetupPendings
 	return nil
 }
 
@@ -138,28 +185,43 @@ func deleteAfter(msg tele.Editable, timeout time.Duration) {
 }
 
 func msgDeleteTimer() {
+	isMsg2Delete := false
+	for _, msg := range msgs2Delete {
+		if msg.Time.Before(time.Now()) {
+			isMsg2Delete = true
+			break
+		}
+	}
+	if isMsg2Delete {
+		msgs2DeleteNew := make([]MsgWithTimeout, 0)
+		for _, m := range msgs2Delete {
+			if m.Time.Before(time.Now()) {
+				bot.Delete(m.Msg)
+			} else {
+				msgs2DeleteNew = append(msgs2DeleteNew, m)
+			}
+		}
+		msgs2Delete = msgs2DeleteNew
+		db.Write("data", "msg2delete", &msgs2Delete)
+	}
+}
+func setupPendingTimer() {
+	setupPendingsNew := make([]SetupPending, 0)
+	for _, v := range setupPendings {
+		v.Timeout--
+		if v.Timeout > 0 {
+			setupPendingsNew = append(setupPendingsNew, v)
+		}
+	}
+	setupPendings = setupPendingsNew
+}
+
+func oneSecondTimer() {
 	interval := time.NewTicker(1 * time.Second)
 	defer interval.Stop()
 	for range interval.C {
-		isMsg2Delete := false
-		for _, msg := range msgs2Delete {
-			if msg.Time.Before(time.Now()) {
-				isMsg2Delete = true
-				break
-			}
-		}
-		if isMsg2Delete {
-			msgs2DeleteNew := make([]MsgWithTimeout, 0)
-			for _, m := range msgs2Delete {
-				if m.Time.Before(time.Now()) {
-					bot.Delete(m.Msg)
-				} else {
-					msgs2DeleteNew = append(msgs2DeleteNew, m)
-				}
-			}
-			msgs2Delete = msgs2DeleteNew
-			db.Write("data", "msg2delete", &msgs2Delete)
-		}
+		msgDeleteTimer()
+		setupPendingTimer()
 	}
 }
 
@@ -173,6 +235,7 @@ func newGroup(gid string) GroupStat {
 		InlineCount: 0,
 		ChatCount:   0,
 		BlockCount:  0,
+		Setup:       gDefaultSetup,
 		Users:       make([]User, 0),
 	}
 }
@@ -186,6 +249,14 @@ func findGroup(gid string) int {
 	return len(inlineStats) - 1
 }
 
+func replySelfDestroyMsg(to *tele.Message, what interface{}, timeout time.Duration) error {
+	msg, err := bot.Reply(to, what, tele.ModeMarkdownV2)
+	if err == nil {
+		deleteAfter(to, timeout)
+		deleteAfter(msg, timeout)
+	}
+	return err
+}
 func sendSelfDestroyMsg(to tele.Recipient, what interface{}, timeout time.Duration) error {
 	msg, err := bot.Send(to, what, tele.ModeMarkdownV2)
 	if err == nil {
@@ -249,6 +320,12 @@ func init() {
 		botStat.LastSummarySentTime = time.Now().Add(-12 * time.Hour)
 		db.Write("data", "bot", &botStat)
 	}
+	for k, v := range inlineStats {
+		if v.Setup.BurnoutLimit == 0 && v.Setup.CooldownMinutes == 0 {
+			inlineStats[k].Setup = gDefaultSetup
+		}
+	}
+	setupPendings = make([]SetupPending, 0)
 	if testEnv.Token != "" {
 		gToken = testEnv.Token
 		gRootID, _ = strconv.ParseInt(testEnv.AdminID, 10, 64)
@@ -285,6 +362,67 @@ func fullName(u *tele.User) string {
 	return u.FirstName + " " + u.LastName
 }
 
+func hasPrivilege(c tele.Context) bool {
+	member, err := bot.ChatMemberOf(c.Chat(), c.Sender())
+	if err != nil {
+		return false
+	}
+	if member.Role != tele.Creator && member.Role != tele.Administrator {
+		return false
+	}
+	return true
+}
+
+const (
+	Help     string = "/help"
+	Heatsink string = "/heatsink"
+	Setup    string = "/setup"
+)
+
+func CmdHandler(fn func(c tele.Context) error) func(c tele.Context) error {
+	return func(c tele.Context) error {
+		if !hasPrivilege(c) {
+			return replySelfDestroyMsg(c.Message(), escape("Only admins can use this command!"), 15*time.Second)
+		}
+		return fn(c)
+	}
+}
+
+func onHelp(c tele.Context) error {
+	gid := strconv.FormatInt(c.Chat().ID, 10)
+	gkey := findGroup(gid)
+
+	help := "This is inline message limiter."
+	help += "\nThe inline messages sent exceeding the specified number within the specified time will be deleted."
+	help += "\n\nCommand (admin only):"
+	help += "\n/help - display this message"
+	help += "\n/heatsink - immediately reset all burnout count"
+	help += "\n/setup - setting burnout to be triggered by sending X inline messages in Y minutes"
+	help += "\n\nCurrent setup: send more than " + strconv.Itoa(inlineStats[gkey].Setup.BurnoutLimit) + " inline messages in " + strconv.Itoa(inlineStats[gkey].Setup.CooldownMinutes) + " minutes would burnout."
+	return sendSelfDestroyMsg(c.Recipient(), escape(help), 300*time.Second)
+}
+func onHeatsink(c tele.Context) error {
+	gid := strconv.FormatInt(c.Chat().ID, 10)
+	gkey := findGroup(gid)
+	inlineStats[gkey].Heatsink()
+	_, err := bot.Reply(c.Message(), escape("Everyone's burnout count has been reset."), tele.ModeMarkdownV2)
+	return err
+}
+func onSetup(c tele.Context) error {
+	gid := strconv.FormatInt(c.Chat().ID, 10)
+	uid := strconv.FormatInt(c.Sender().ID, 10)
+	for k, v := range setupPendings {
+		if v.Gid == gid && v.Uid == uid {
+			setupPendings[k].Timeout = 0
+		}
+	}
+	setupPendings = append(setupPendings, SetupPending{Gid: gid, Uid: uid, Timeout: 100})
+	reply := "Set burnout to be triggered by sending `X` inline messages in `Y` minutes in the following format:`X,Y`"
+	reply += "\nExample: `4,240`"
+	reply += fmt.Sprintf("\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBurnoutLimitMin, gBurnoutLimitMax, gCooldownMinutesMin, gCooldownMinutesMax)
+	return replySelfDestroyMsg(c.Message(), reply, 100*time.Second)
+}
+
 func main() {
 	pref := tele.Settings{
 		Token:  gToken,
@@ -301,12 +439,13 @@ func main() {
 		bot.Handle(v, msgHandler)
 	}
 	bot.Handle(tele.OnAddedToGroup, func(c tele.Context) error {
-		c.Send("My pleasure to join the group! Inline messages will be limited by me.")
-		return nil
+		return c.Send("My pleasure to join the group! Inline messages will be limited by me.")
 	})
-
+	bot.Handle(Help, CmdHandler(onHelp))
+	bot.Handle(Heatsink, CmdHandler(onHeatsink))
+	bot.Handle(Setup, CmdHandler(onSetup))
 	go bot.Start()
-	go msgDeleteTimer()
+	go oneSecondTimer()
 	go inlineCooldownRoutine()
 
 	fmt.Printf("[%s] bot online!\n", time.Now().Format(gTimeFormat))
