@@ -278,6 +278,10 @@ func inlineCooldownRoutine() {
 		for gk, group := range inlineStats {
 			for uk, user := range group.Users {
 				if user.Cooldown > 0 {
+					// in case of setup changed
+					if user.Cooldown > group.Setup.CooldownMinutes {
+						user.Cooldown = group.Setup.CooldownMinutes
+					}
 					user.Cooldown--
 					if user.Cooldown <= 0 {
 						user.Count = 0
