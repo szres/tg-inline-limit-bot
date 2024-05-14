@@ -385,6 +385,9 @@ const (
 
 func CmdHandler(fn func(c tele.Context) error) func(c tele.Context) error {
 	return func(c tele.Context) error {
+		if c.Chat().Type == tele.ChatPrivate {
+			return c.Send("Command is only valid in a group.")
+		}
 		if !hasPrivilege(c) {
 			return replySelfDestroyMsg(c.Message(), escape("Only admins can use this command!"), 15*time.Second)
 		}
