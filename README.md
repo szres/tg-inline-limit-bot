@@ -11,6 +11,8 @@
 
 This bot can limit the number of inline messages sent by members in a group to avoid inline message storms.
 
+https://github.com/szres/tg-inline-limit-bot/assets/1407471/b1db7707-a364-4459-9630-8a6dcea1a7b7
+
 ## Usage
 
 Just add this bot to the group and give it the permission to manage and delete messages.
