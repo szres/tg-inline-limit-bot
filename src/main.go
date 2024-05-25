@@ -19,6 +19,8 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
+// TODO: Code Refactoring
+
 type testenv struct {
 	Token   string `json:"token"`
 	AdminID string `json:"adminid"`
@@ -34,15 +36,19 @@ type BotStat struct {
 var botStat BotStat
 
 var (
-	gTimeFormat         string = "2006-01-02 15:04:05"
-	gRootID             int64
-	gKumaPushURL        string
-	gToken              string
-	gCooldownMinutesMin int           = 5
-	gCooldownMinutesMax int           = 1440
-	gBurnoutLimitMin    int           = 0
-	gBurnoutLimitMax    int           = 13
-	gWarningTimeout     time.Duration = 15 * time.Second
+	gTimeFormat            string = "2006-01-02 15:04:05"
+	gRootID                int64
+	gKumaPushURL           string
+	gToken                 string
+	gCooldownMinutesMin    int           = 5
+	gCooldownMinutesMax    int           = 1440
+	gBurnoutLimitMin       int           = 0
+	gBurnoutLimitMax       int           = 13
+	gWarningTimeout        time.Duration = 15 * time.Second
+	gBotCooldownMinutesMin int           = 1
+	gBotCooldownMinutesMax int           = 1440
+	gBotBurnoutLimitMin    int           = 1
+	gBotBurnoutLimitMax    int           = 1440
 )
 
 type User struct {
@@ -62,6 +68,11 @@ type GroupSetup struct {
 	BurnoutLimit    int
 }
 
+type BotSetup struct {
+	GroupSetup
+	User
+}
+
 var gDefaultSetup = GroupSetup{
 	CooldownMinutes: 240,
 	BurnoutLimit:    4,
@@ -74,12 +85,33 @@ type GroupStat struct {
 	BlockCount  int        `json:"blockcount"`
 	Setup       GroupSetup `json:"setup"`
 	Users       []User     `json:"users"`
+	BotsSetup   []BotSetup `json:"botsetup"`
 }
 
 func (g *GroupStat) NewUser(id string) {
 	g.Users = append(g.Users, User{Id: id, Count: 0, Cooldown: g.Setup.CooldownMinutes})
 }
 
+func (g *GroupStat) FindBotSetup(name string) *BotSetup {
+	for i, v := range g.BotsSetup {
+		if v.Id == name {
+			return &g.BotsSetup[i]
+		}
+	}
+	return nil
+}
+func (g *GroupStat) NewBotSetup(name string, cooldown int, burnout int) int {
+	g.BotsSetup = append(g.BotsSetup, BotSetup{User: User{Id: name, Count: 0, Cooldown: 0}, GroupSetup: GroupSetup{CooldownMinutes: cooldown, BurnoutLimit: burnout}})
+	return len(g.BotsSetup) - 1
+}
+func (g *GroupStat) RemoveBotSetup(name string) {
+	for i, v := range g.BotsSetup {
+		if v.Id == name {
+			g.BotsSetup = append(g.BotsSetup[:i], g.BotsSetup[i+1:]...)
+			return
+		}
+	}
+}
 func (g *GroupStat) FindUser(id string) int {
 	for k, v := range g.Users {
 		if v.Id == id {
@@ -103,6 +135,9 @@ func (g *GroupStat) StatOnMsgType(t string) {
 
 func (g *GroupStat) Heatsink() {
 	g.Users = make([]User, 0)
+	for i := range g.BotsSetup {
+		g.BotsSetup[i].Count = 0
+	}
 }
 func (g *GroupStat) StatReset() {
 	g.InlineCount = 0
@@ -118,20 +153,41 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 	}
 	if c.Message().Via != nil {
 		fmt.Printf("[%s][%s:%s][MSG] Type:inline From:@%s\n", time.Now().Format(gTimeFormat), g.Id, uid, c.Message().Via.Username)
-		g.Users[uk].Count++
-		if g.Users[uk].Count == 1 {
-			g.Users[uk].Cooldown = g.Setup.CooldownMinutes
-		}
-		if g.Users[uk].Count > g.Setup.BurnoutLimit {
-			fmt.Println("\t\t--BLOCKED--")
+
+		if g.Users[uk].Count >= g.Setup.BurnoutLimit {
+			fmt.Println("\t\t[USER BURNED]")
 			g.StatOnMsgType("block")
 			c.Delete()
 			name := fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)
 			warning := escape(fmt.Sprintf("your inline message burned out! It may take significant time for resetting. %d minutes left.", g.Users[uk].Cooldown))
 			sendSelfDestroyMsg(c.Recipient(), name+", "+warning, gWarningTimeout)
 		} else {
-			fmt.Println("\t\t--ALLOWED--")
-			g.StatOnMsgType("inline")
+
+			botsetup := g.FindBotSetup(c.Message().Via.Username)
+
+			if botsetup != nil && botsetup.Count >= botsetup.BurnoutLimit {
+				fmt.Println("\t\t[BOT BURNED]")
+				g.StatOnMsgType("block")
+				c.Delete()
+				name := botsetup.Id
+				warning := fmt.Sprintf(" burned out! It may take significant time for resetting. %d minutes left.", botsetup.Cooldown)
+				sendSelfDestroyMsg(c.Recipient(), escape("Bot @"+name+warning), gWarningTimeout)
+			} else {
+				g.Users[uk].Count++
+				if g.Users[uk].Count == 1 {
+					g.Users[uk].Cooldown = g.Setup.CooldownMinutes
+				}
+				log := fmt.Sprintf("\t\t[ALLOWED] User:%d/%d", g.Users[uk].Count, g.Setup.BurnoutLimit)
+				if botsetup != nil {
+					botsetup.Count++
+					if botsetup.Count == 1 {
+						botsetup.Cooldown = botsetup.CooldownMinutes
+					}
+					log += fmt.Sprintf(" @%s:%d/%d", botsetup.Id, botsetup.Count, botsetup.BurnoutLimit)
+				}
+				fmt.Println(log)
+				g.StatOnMsgType("inline")
+			}
 		}
 	} else {
 		g.StatOnMsgType("chat")
@@ -140,37 +196,73 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 	return nil
 }
 
-type SetupPending struct {
-	Gid     string
-	Uid     string
-	Timeout int
+func onSetup(g *GroupStat, c tele.Context) bool {
+	matchs := regexp.MustCompile(`^/setup(?: (\d+),\s?(\d+))?$`).FindStringSubmatch(c.Text())
+	if len(matchs) > 0 {
+		if len(matchs[1]) == 0 || len(matchs[2]) == 0 {
+			onSetupHelp(c)
+			return true
+		}
+
+		burnout, err1 := strconv.Atoi(matchs[1])
+		cooldown, err2 := strconv.Atoi(matchs[2])
+		if err1 != nil || err2 != nil ||
+			burnout < gBurnoutLimitMin || burnout > gBurnoutLimitMax ||
+			cooldown < gCooldownMinutesMin || cooldown > gCooldownMinutesMax {
+			reply := escape(fmt.Sprintf("Invalid value.\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBurnoutLimitMin, gBurnoutLimitMax, gCooldownMinutesMin, gCooldownMinutesMax))
+			bot.Reply(c.Message(), reply, tele.ModeMarkdownV2)
+			return true
+		}
+		g.Setup.BurnoutLimit = burnout
+		g.Setup.CooldownMinutes = cooldown
+		bot.Reply(c.Message(), fmt.Sprintf("Setup update successful\nNow, user burnout is set to be triggered by sending more than `%d` inline messages in `%d` minutes", burnout, cooldown), tele.ModeMarkdownV2)
+		return true
+	}
+	return false
 }
-
-var setupPendings []SetupPending
-
-func (g *GroupStat) OnChatMsg(c tele.Context) error {
-	newSetupPendings := make([]SetupPending, 0)
-	for _, v := range setupPendings {
-		if v.Gid == g.Id && v.Uid == strconv.FormatInt(c.Sender().ID, 10) {
-			matchs := regexp.MustCompile(`^(\d+),\s?(\d+)$`).FindStringSubmatch(c.Text())
-			if len(matchs) > 0 {
-				burnout, err1 := strconv.Atoi(matchs[1])
-				cooldown, err2 := strconv.Atoi(matchs[2])
-				if err1 != nil || err2 != nil ||
-					burnout < gBurnoutLimitMin || burnout > gBurnoutLimitMax ||
-					cooldown < gCooldownMinutesMin || cooldown > gCooldownMinutesMax {
-					bot.Reply(c.Message(), escape("Invalid value."), tele.ModeMarkdownV2)
-					continue
-				}
-				g.Setup.BurnoutLimit = burnout
-				g.Setup.CooldownMinutes = cooldown
-				bot.Reply(c.Message(), fmt.Sprintf("Setup update successful\nNow, burnout is set to be triggered by sending more than `%d` inline messages in `%d` minutes", burnout, cooldown), tele.ModeMarkdownV2)
-			}
+func onBotLimit(g *GroupStat, c tele.Context) bool {
+	matchs := regexp.MustCompile(`^/botlimit(?: (\d+),\s?(\d+))?$`).FindStringSubmatch(c.Text())
+	if len(matchs) > 0 {
+		if len(matchs[1]) == 0 || len(matchs[2]) == 0 || c.Message().ReplyTo == nil || c.Message().ReplyTo.Via == nil {
+			onBotLimitHelp(c)
+			return true
 		} else {
-			newSetupPendings = append(newSetupPendings, v)
+			botName := c.Message().ReplyTo.Via.Username
+			burnout, err1 := strconv.Atoi(matchs[1])
+			cooldown, err2 := strconv.Atoi(matchs[2])
+			if err1 != nil || err2 != nil || ((burnout != 0 && cooldown != 0) &&
+				(burnout < gBotBurnoutLimitMin || burnout > gBotBurnoutLimitMax ||
+					cooldown < gBotCooldownMinutesMin || cooldown > gBotCooldownMinutesMax)) {
+				reply := escape(fmt.Sprintf("Invalid value.\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBotBurnoutLimitMin, gBotBurnoutLimitMax, gBotCooldownMinutesMin, gBotCooldownMinutesMax))
+				bot.Reply(c.Message(), reply, tele.ModeMarkdownV2)
+				return true
+			}
+			if burnout == 0 && cooldown == 0 {
+				g.RemoveBotSetup(botName)
+				bot.Reply(c.Message(), "Remove bot limit successful", tele.ModeMarkdownV2)
+			} else {
+				bs := g.FindBotSetup(botName)
+				if bs == nil {
+					g.NewBotSetup(botName, cooldown, burnout)
+				} else {
+					bs.CooldownMinutes = cooldown
+					bs.BurnoutLimit = burnout
+				}
+				bot.Reply(c.Message(), escape(fmt.Sprintf("Setup successful\nBot @%s's limit is set to %d messages in %d minutes", botName, burnout, cooldown)), tele.ModeMarkdownV2)
+			}
+			return true
 		}
 	}
-	setupPendings = newSetupPendings
+	return false
+}
+func (g *GroupStat) OnChatMsg(c tele.Context) error {
+	if hasPrivilege(c) {
+		for _, v := range cmdWithParamsHandlers {
+			if v(g, c) {
+				return nil
+			}
+		}
+	}
 	return nil
 }
 
@@ -209,23 +301,12 @@ func msgDeleteTimer() {
 		db.Write("data", "msg2delete", &msgs2Delete)
 	}
 }
-func setupPendingTimer() {
-	setupPendingsNew := make([]SetupPending, 0)
-	for _, v := range setupPendings {
-		v.Timeout--
-		if v.Timeout > 0 {
-			setupPendingsNew = append(setupPendingsNew, v)
-		}
-	}
-	setupPendings = setupPendingsNew
-}
 
 func oneSecondTimer() {
 	interval := time.NewTicker(1 * time.Second)
 	defer interval.Stop()
 	for range interval.C {
 		msgDeleteTimer()
-		setupPendingTimer()
 	}
 }
 
@@ -293,6 +374,18 @@ func inlineCooldownRoutine() {
 					inlineStats[gk].Users[uk] = user
 				}
 			}
+			for bk := range group.BotsSetup {
+				bs := &group.BotsSetup[bk]
+				if bs.Cooldown > 0 {
+					if bs.Cooldown > bs.CooldownMinutes {
+						bs.Cooldown = bs.CooldownMinutes
+					}
+					bs.Cooldown--
+					if bs.Cooldown <= 0 {
+						bs.Count = 0
+					}
+				}
+			}
 		}
 
 		if time.Now().After(botStat.LastSummarySentTime.Add(24*time.Hour)) ||
@@ -333,7 +426,6 @@ func init() {
 			inlineStats[k].Setup = gDefaultSetup
 		}
 	}
-	setupPendings = make([]SetupPending, 0)
 	if testEnv.Token != "" {
 		gToken = testEnv.Token
 		gRootID, _ = strconv.ParseInt(testEnv.AdminID, 10, 64)
@@ -384,10 +476,16 @@ func hasPrivilege(c tele.Context) bool {
 const (
 	Help     string = "/help"
 	Heatsink string = "/heatsink"
-	Setup    string = "/setup"
+	Setup    string = `^/setup (\d+),\s?(\d+)$`
+	BotLimit string = `^/botlimit (\d+),\s?(\d+)$`
 )
 
-func CmdHandler(fn func(c tele.Context) error) func(c tele.Context) error {
+var cmdWithParamsHandlers = []func(g *GroupStat, c tele.Context) bool{
+	onSetup,
+	onBotLimit,
+}
+
+func DirectCmdHandler(fn func(c tele.Context) error) func(c tele.Context) error {
 	return func(c tele.Context) error {
 		if c.Chat().Type == tele.ChatPrivate {
 			return c.Send("Command is only valid in a group.")
@@ -406,11 +504,19 @@ func onHelp(c tele.Context) error {
 	help := "This is inline message limiter."
 	help += "\nThe inline messages sent exceeding the specified number within the specified time will be deleted."
 	help += "\n\nCommand (admin only):"
-	help += "\n/help - display this message"
-	help += "\n/heatsink - immediately reset all burnout count"
-	help += "\n/setup - setting burnout to be triggered by sending X inline messages in Y minutes"
-	help += "\n\nCurrent setup: send more than " + strconv.Itoa(inlineStats[gkey].Setup.BurnoutLimit) + " inline messages in " + strconv.Itoa(inlineStats[gkey].Setup.CooldownMinutes) + " minutes would burnout."
-	return sendSelfDestroyMsg(c.Recipient(), escape(help), 300*time.Second)
+	help += "\n/help - display help message"
+	help += "\n/heatsink - immediately cooldown for everything"
+	help = escape(help)
+	help += "\n`/setup <X>,<Y>`" + escape(" - setting user burnout to be triggered by sending X inline messages in Y minutes")
+	help += "\n`/botlimit <X>,<Y>`" + escape(" - reply to the inline message to set the limit of the sender bot")
+
+	help += escape("\n\nCurrent setup:\nUser allowed " + strconv.Itoa(inlineStats[gkey].Setup.BurnoutLimit) + " inline messages in " + strconv.Itoa(inlineStats[gkey].Setup.CooldownMinutes) + " minutes.")
+	if len(inlineStats[gkey].BotsSetup) > 0 {
+		for _, v := range inlineStats[gkey].BotsSetup {
+			help += escape("\nBot @" + v.Id + " allowed " + strconv.Itoa(v.BurnoutLimit) + " messages in " + strconv.Itoa(v.CooldownMinutes) + " minutes.")
+		}
+	}
+	return sendSelfDestroyMsg(c.Recipient(), help, 300*time.Second)
 }
 func onHeatsink(c tele.Context) error {
 	gid := strconv.FormatInt(c.Chat().ID, 10)
@@ -419,19 +525,20 @@ func onHeatsink(c tele.Context) error {
 	_, err := bot.Reply(c.Message(), escape("Everyone's burnout count has been reset."), tele.ModeMarkdownV2)
 	return err
 }
-func onSetup(c tele.Context) error {
-	gid := strconv.FormatInt(c.Chat().ID, 10)
-	uid := strconv.FormatInt(c.Sender().ID, 10)
-	for k, v := range setupPendings {
-		if v.Gid == gid && v.Uid == uid {
-			setupPendings[k].Timeout = 0
-		}
-	}
-	setupPendings = append(setupPendings, SetupPending{Gid: gid, Uid: uid, Timeout: 100})
-	reply := "Set burnout to be triggered by sending `X` inline messages in `Y` minutes in the following format:`X,Y`"
-	reply += "\nExample: `4,240`"
+
+func onSetupHelp(c tele.Context) error {
+	reply := "Usage: `/setup <X>,<Y>`"
+	reply += "\nExample: `/setup 4,240`"
 	reply += fmt.Sprintf("\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBurnoutLimitMin, gBurnoutLimitMax, gCooldownMinutesMin, gCooldownMinutesMax)
-	return replySelfDestroyMsg(c.Message(), reply, 100*time.Second)
+	return replySelfDestroyMsg(c.Message(), reply, 60*time.Second)
+}
+
+func onBotLimitHelp(c tele.Context) error {
+	reply := "Usage: REPLY to the inline message `/botlimit <X>,<Y>`"
+	reply += escape("\nExample: relpy to message {User via @InlineBot} with") + " `/botlimit 4,240`"
+	reply += fmt.Sprintf("\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBotBurnoutLimitMin, gBotBurnoutLimitMax, gBotCooldownMinutesMin, gBotCooldownMinutesMax)
+	reply += escape("\nSet the X and Y value to 0 would remove the limit of the bot.")
+	return replySelfDestroyMsg(c.Message(), reply, 60*time.Second)
 }
 
 func main() {
@@ -445,16 +552,14 @@ func main() {
 		log.Fatal(err)
 		return
 	}
-
 	for _, v := range []string{tele.OnText, tele.OnPhoto, tele.OnAnimation, tele.OnDocument, tele.OnSticker, tele.OnVideo, tele.OnVoice} {
 		bot.Handle(v, msgHandler)
 	}
 	bot.Handle(tele.OnAddedToGroup, func(c tele.Context) error {
 		return c.Send("My pleasure to join the group! Inline messages will be limited by me.")
 	})
-	bot.Handle(Help, CmdHandler(onHelp))
-	bot.Handle(Heatsink, CmdHandler(onHeatsink))
-	bot.Handle(Setup, CmdHandler(onSetup))
+	bot.Handle(Help, DirectCmdHandler(onHelp))
+	bot.Handle(Heatsink, DirectCmdHandler(onHeatsink))
 	go bot.Start()
 	go oneSecondTimer()
 	go inlineCooldownRoutine()
