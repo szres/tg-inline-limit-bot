@@ -34,15 +34,19 @@ type BotStat struct {
 var botStat BotStat
 
 var (
-	gTimeFormat         string = "2006-01-02 15:04:05"
-	gRootID             int64
-	gKumaPushURL        string
-	gToken              string
-	gCooldownMinutesMin int           = 5
-	gCooldownMinutesMax int           = 1440
-	gBurnoutLimitMin    int           = 0
-	gBurnoutLimitMax    int           = 13
-	gWarningTimeout     time.Duration = 15 * time.Second
+	gTimeFormat            string = "2006-01-02 15:04:05"
+	gRootID                int64
+	gKumaPushURL           string
+	gToken                 string
+	gCooldownMinutesMin    int           = 5
+	gCooldownMinutesMax    int           = 1440
+	gBurnoutLimitMin       int           = 0
+	gBurnoutLimitMax       int           = 13
+	gWarningTimeout        time.Duration = 15 * time.Second
+	gBotCooldownMinutesMin int           = 1
+	gBotCooldownMinutesMax int           = 1440
+	gBotBurnoutLimitMin    int           = 1
+	gBotBurnoutLimitMax    int           = 1440
 )
 
 type User struct {
@@ -141,23 +145,40 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 }
 
 func onSetup(g *GroupStat, c tele.Context) bool {
-	matchs := regexp.MustCompile(`^/setup (\d+),\s?(\d+)$`).FindStringSubmatch(c.Text())
+	matchs := regexp.MustCompile(`^/setup(?: (\d+),\s?(\d+))?$`).FindStringSubmatch(c.Text())
 	if len(matchs) > 0 {
+		if len(matchs[1]) == 0 || len(matchs[2]) == 0 {
+			onSetupHelp(c)
+			return true
+		}
+
 		burnout, err1 := strconv.Atoi(matchs[1])
 		cooldown, err2 := strconv.Atoi(matchs[2])
 		if err1 != nil || err2 != nil ||
 			burnout < gBurnoutLimitMin || burnout > gBurnoutLimitMax ||
 			cooldown < gCooldownMinutesMin || cooldown > gCooldownMinutesMax {
-			bot.Reply(c.Message(), escape("Invalid value."), tele.ModeMarkdownV2)
+			reply := escape(fmt.Sprintf("Invalid value.\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBurnoutLimitMin, gBurnoutLimitMax, gCooldownMinutesMin, gCooldownMinutesMax))
+			bot.Reply(c.Message(), reply, tele.ModeMarkdownV2)
+			return true
 		}
 		g.Setup.BurnoutLimit = burnout
 		g.Setup.CooldownMinutes = cooldown
-		bot.Reply(c.Message(), fmt.Sprintf("Setup update successful\nNow, burnout is set to be triggered by sending more than `%d` inline messages in `%d` minutes", burnout, cooldown), tele.ModeMarkdownV2)
+		bot.Reply(c.Message(), fmt.Sprintf("Setup update successful\nNow, user burnout is set to be triggered by sending more than `%d` inline messages in `%d` minutes", burnout, cooldown), tele.ModeMarkdownV2)
 		return true
 	}
 	return false
 }
 func onBotLimit(g *GroupStat, c tele.Context) bool {
+	matchs := regexp.MustCompile(`^/botlimit(?: (\d+),\s?(\d+))?$`).FindStringSubmatch(c.Text())
+	if len(matchs) > 0 {
+		if len(matchs[1]) == 0 || len(matchs[2]) == 0 || c.Message().ReplyTo == nil || c.Message().ReplyTo.Via == nil {
+			onBotLimitHelp(c)
+			return true
+		} else {
+			fmt.Println("reply to", c.Message().ReplyTo.Via.Username)
+			return true
+		}
+	}
 	return false
 }
 func (g *GroupStat) OnChatMsg(c tele.Context) error {
@@ -399,11 +420,13 @@ func onHelp(c tele.Context) error {
 	help += "\n\nCommand (admin only):"
 	help += "\n/help - display this message"
 	help += "\n/heatsink - immediately reset all burnout count"
-	help += "\n/setup <X>,<Y> - setting user burnout to be triggered by sending X inline messages in Y minutes"
-	help += "\n/botlimit <X>,<Y> - reply to the inline message to set the limit of the sender bot"
-	help += "\n\nCurrent setup: User sends more than " + strconv.Itoa(inlineStats[gkey].Setup.BurnoutLimit) + " inline messages in " + strconv.Itoa(inlineStats[gkey].Setup.CooldownMinutes) + " minutes would burnout."
-	help += "\n"
-	return sendSelfDestroyMsg(c.Recipient(), escape(help), 300*time.Second)
+	help = escape(help)
+	help += "\n`/setup <X>,<Y>`" + escape(" - setting user burnout to be triggered by sending X inline messages in Y minutes")
+	help += "\n`/botlimit <X>,<Y>`" + escape(" - reply to the inline message to set the limit of the sender bot")
+
+	help += escape("\n\nCurrent setup: User sends more than " + strconv.Itoa(inlineStats[gkey].Setup.BurnoutLimit) + " inline messages in " + strconv.Itoa(inlineStats[gkey].Setup.CooldownMinutes) + " minutes would burnout.")
+	// help += "\n"
+	return sendSelfDestroyMsg(c.Recipient(), help, 300*time.Second)
 }
 func onHeatsink(c tele.Context) error {
 	gid := strconv.FormatInt(c.Chat().ID, 10)
@@ -413,20 +436,20 @@ func onHeatsink(c tele.Context) error {
 	return err
 }
 
-// func onSetup(c tele.Context) error {
-// 	gid := strconv.FormatInt(c.Chat().ID, 10)
-// 	uid := strconv.FormatInt(c.Sender().ID, 10)
-// 	for k, v := range setupPendings {
-// 		if v.Gid == gid && v.Uid == uid {
-// 			setupPendings[k].Timeout = 0
-// 		}
-// 	}
-// 	setupPendings = append(setupPendings, SetupPending{Gid: gid, Uid: uid, Timeout: 100})
-// 	reply := "Set burnout to be triggered by sending `X` inline messages in `Y` minutes in the following format:`X,Y`"
-// 	reply += "\nExample: `4,240`"
-// 	reply += fmt.Sprintf("\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBurnoutLimitMin, gBurnoutLimitMax, gCooldownMinutesMin, gCooldownMinutesMax)
-// 	return replySelfDestroyMsg(c.Message(), reply, 100*time.Second)
-// }
+func onSetupHelp(c tele.Context) error {
+	reply := "Usage: `/setup <X>,<Y>`"
+	reply += "\nExample: `/setup 4,240`"
+	reply += fmt.Sprintf("\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBurnoutLimitMin, gBurnoutLimitMax, gCooldownMinutesMin, gCooldownMinutesMax)
+	return replySelfDestroyMsg(c.Message(), reply, 60*time.Second)
+}
+
+func onBotLimitHelp(c tele.Context) error {
+	reply := "Usage: REPLY to the inline message `/botlimit <X>,<Y>`"
+	reply += escape("\nExample: relpy to message {User via @InlineBot} with") + " `/botlimit 4,240`"
+	reply += fmt.Sprintf("\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBotBurnoutLimitMin, gBotBurnoutLimitMax, gBotCooldownMinutesMin, gBotCooldownMinutesMax)
+	reply += escape("\nSet the X and Y value to 0 would remove the limit of the bot.")
+	return replySelfDestroyMsg(c.Message(), reply, 60*time.Second)
+}
 
 func main() {
 	pref := tele.Settings{
