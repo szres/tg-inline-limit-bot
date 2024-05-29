@@ -71,6 +71,7 @@ type GroupSetup struct {
 type BotSetup struct {
 	GroupSetup
 	User
+	Warned bool
 }
 
 var gDefaultSetup = GroupSetup{
@@ -137,6 +138,7 @@ func (g *GroupStat) Heatsink() {
 	g.Users = make([]User, 0)
 	for i := range g.BotsSetup {
 		g.BotsSetup[i].Count = 0
+		g.BotsSetup[i].Warned = false
 	}
 }
 func (g *GroupStat) StatReset() {
@@ -170,8 +172,16 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 				g.StatOnMsgType("block")
 				c.Delete()
 				name := botsetup.Id
-				warning := fmt.Sprintf(" burned out! It may take significant time for resetting. %d minutes left.", botsetup.Cooldown)
-				sendSelfDestroyMsg(c.Recipient(), escape("Bot @"+name+warning), gWarningTimeout)
+				warning := " burned out! It may take significant time for resetting."
+				if !botsetup.Warned {
+					warning += fmt.Sprintf(" Until %s.", time.Now().Add(time.Minute*time.Duration(botsetup.Cooldown)).Format("15:04"))
+					bot.Send(c.Recipient(), escape("Bot @"+name+warning), tele.ModeMarkdownV2)
+					botsetup.Warned = true
+				} else {
+					warning += fmt.Sprintf(" %d minutes left.", botsetup.Cooldown)
+					sendSelfDestroyMsg(c.Recipient(), escape("Bot @"+name+warning), gWarningTimeout)
+				}
+
 			} else {
 				g.Users[uk].Count++
 				if g.Users[uk].Count == 1 {
@@ -383,6 +393,7 @@ func inlineCooldownRoutine() {
 					bs.Cooldown--
 					if bs.Cooldown <= 0 {
 						bs.Count = 0
+						bs.Warned = false
 					}
 				}
 			}
