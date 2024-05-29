@@ -1,7 +1,6 @@
 
 <div align="center">
-	<img width="128" src="assets/logo.png"/>
-	<h1>telegram inline message limiter</h1>
+	<img src="https://socialify.git.ci/szres/tg-inline-limit-bot/image?description=1&font=Jost&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fszres%2Ftg-inline-limit-bot%2Fmain%2Fassets%2Flogo.png&name=1&pattern=Brick%20Wall&theme=Auto" alt="tg-inline-limit-bot" width="640" height="320" />
 </div>
 
 [![Chat on Telegram](https://img.shields.io/badge/@inline_limiter_bot-2CA5E0.svg?logo=telegram&label=Telegram)](https://t.me/inline_limiter_bot)
