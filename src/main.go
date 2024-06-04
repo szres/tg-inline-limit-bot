@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"os/signal"
@@ -15,6 +14,7 @@ import (
 	_ "time/tzdata"
 
 	kuma "github.com/Nigh/kuma-push"
+	"github.com/charmbracelet/log"
 	scribble "github.com/nanobox-io/golang-scribble"
 	tele "gopkg.in/telebot.v3"
 )
@@ -36,7 +36,6 @@ type BotStat struct {
 var botStat BotStat
 
 var (
-	gTimeFormat            string = "2006-01-02 15:04:05"
 	gRootID                int64
 	gKumaPushURL           string
 	gToken                 string
@@ -91,6 +90,7 @@ type GroupStat struct {
 
 func (g *GroupStat) NewUser(id string) {
 	g.Users = append(g.Users, User{Id: id, Count: 0, Cooldown: g.Setup.CooldownMinutes})
+	log.Debug(fmt.Sprintf("NewUser: %s, %d", id, g.Setup.CooldownMinutes))
 }
 
 func (g *GroupStat) FindBotSetup(name string) *BotSetup {
@@ -154,51 +154,51 @@ func (g *GroupStat) StatOnMsg(c tele.Context) error {
 		return nil
 	}
 	if c.Message().Via != nil {
-		fmt.Printf("[%s][%s:%s][MSG] Type:inline From:@%s\n", time.Now().Format(gTimeFormat), g.Id, uid, c.Message().Via.Username)
-
+		var result string
+		var botsetup *BotSetup
 		if g.Users[uk].Count >= g.Setup.BurnoutLimit {
-			fmt.Println("\t\t[USER BURNED]")
+			result = "[BURNED](USER)"
 			g.StatOnMsgType("block")
 			c.Delete()
 			name := fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)
 			warning := escape(fmt.Sprintf("your inline message burned out! It may take significant time for resetting. %d minutes left.", g.Users[uk].Cooldown))
 			sendSelfDestroyMsg(c.Recipient(), name+", "+warning, gWarningTimeout)
 		} else {
-
-			botsetup := g.FindBotSetup(c.Message().Via.Username)
-
+			botsetup = g.FindBotSetup(c.Message().Via.Username)
 			if botsetup != nil && botsetup.Count >= botsetup.BurnoutLimit {
-				fmt.Println("\t\t[BOT BURNED]")
+				result = "[BURNED](BOT)"
 				g.StatOnMsgType("block")
 				c.Delete()
 				name := botsetup.Id
 				warning := " burned out! It may take significant time for resetting."
 				if !botsetup.Warned {
 					warning += fmt.Sprintf(" Until %s.", time.Now().Add(time.Minute*time.Duration(botsetup.Cooldown)).Format("15:04"))
-					bot.Send(c.Recipient(), escape("Bot @"+name+warning), tele.ModeMarkdownV2)
+					sendMsg(c.Recipient(), escape("Bot @"+name+warning))
 					botsetup.Warned = true
 				} else {
 					warning += fmt.Sprintf(" %d minutes left.", botsetup.Cooldown)
 					sendSelfDestroyMsg(c.Recipient(), escape("Bot @"+name+warning), gWarningTimeout)
 				}
-
 			} else {
 				g.Users[uk].Count++
 				if g.Users[uk].Count == 1 {
 					g.Users[uk].Cooldown = g.Setup.CooldownMinutes
 				}
-				log := fmt.Sprintf("\t\t[ALLOWED] User:%d/%d", g.Users[uk].Count, g.Setup.BurnoutLimit)
+				result = "[ALLOWED]"
 				if botsetup != nil {
 					botsetup.Count++
 					if botsetup.Count == 1 {
 						botsetup.Cooldown = botsetup.CooldownMinutes
 					}
-					log += fmt.Sprintf(" @%s:%d/%d", botsetup.Id, botsetup.Count, botsetup.BurnoutLimit)
 				}
-				fmt.Println(log)
 				g.StatOnMsgType("inline")
 			}
 		}
+		details := fmt.Sprintf("Chat %s\nUser @%s:%d/%d", g.Id, g.Users[uk].Id, g.Users[uk].Count, g.Setup.BurnoutLimit)
+		if botsetup != nil {
+			details += fmt.Sprintf("\nBot @%s:%d/%d", botsetup.Id, botsetup.Count, botsetup.BurnoutLimit)
+		}
+		msgLog.Info(result, "detail", details)
 	} else {
 		g.StatOnMsgType("chat")
 		g.OnChatMsg(c)
@@ -303,6 +303,7 @@ func msgDeleteTimer() {
 		for _, m := range msgs2Delete {
 			if m.Time.Before(time.Now()) {
 				bot.Delete(m.Msg)
+				log.Debug("[DELETE MSG]", "chatId", m.Msg.ChatID, "msgId", m.Msg.MessageID)
 			} else {
 				msgs2DeleteNew = append(msgs2DeleteNew, m)
 			}
@@ -346,6 +347,7 @@ func findGroup(gid string) int {
 
 func replySelfDestroyMsg(to *tele.Message, what interface{}, timeout time.Duration) error {
 	msg, err := bot.Reply(to, what, tele.ModeMarkdownV2)
+	log.Debug("[REPLY MSG]", "to", to.ID, "what", what)
 	if err == nil {
 		deleteAfter(to, timeout)
 		deleteAfter(msg, timeout)
@@ -354,10 +356,14 @@ func replySelfDestroyMsg(to *tele.Message, what interface{}, timeout time.Durati
 }
 func sendSelfDestroyMsg(to tele.Recipient, what interface{}, timeout time.Duration) error {
 	msg, err := bot.Send(to, what, tele.ModeMarkdownV2)
-	if err == nil {
+	log.Debug("[SEND MSG]", "to", to.Recipient(), "what", what)
+	if err == nil && timeout > 0 {
 		deleteAfter(msg, timeout)
 	}
 	return err
+}
+func sendMsg(to tele.Recipient, what interface{}) error {
+	return sendSelfDestroyMsg(to, what, 0)
 }
 
 func msgHandler(c tele.Context) error {
@@ -380,6 +386,7 @@ func inlineCooldownRoutine() {
 					user.Cooldown--
 					if user.Cooldown <= 0 {
 						user.Count = 0
+						timerLog.Info("[COOLDOWN]", "detail", fmt.Sprintf("Chat %s\nUser @%s", group.Id, user.Id))
 					}
 					inlineStats[gk].Users[uk] = user
 				}
@@ -394,6 +401,7 @@ func inlineCooldownRoutine() {
 					if bs.Cooldown <= 0 {
 						bs.Count = 0
 						bs.Warned = false
+						timerLog.Info("[COOLDOWN]", "detail", fmt.Sprintf("Chat %s\nBot @%s", group.Id, bs.Id))
 					}
 				}
 			}
@@ -403,9 +411,9 @@ func inlineCooldownRoutine() {
 			(time.Now().After(botStat.LastSummarySentTime.Add(12*time.Hour)) && time.Now().Hour() >= 23 && time.Now().Minute() >= 30) {
 			go func() {
 				hours := int(math.Ceil(time.Since(botStat.LastSummarySentTime).Hours()))
-				fmt.Printf("--- %dH SUMMARY ----------------\n", hours)
+				summaryLog.Infof("in %d hours", hours)
 				for k, group := range inlineStats {
-					fmt.Printf("[%s] total:%d inline:%d block:%d\n", group.Id, group.ChatCount+group.InlineCount, group.InlineCount, group.BlockCount)
+					summaryLog.Infof("[%s] total:%d inline:%d block:%d", group.Id, group.ChatCount+group.InlineCount, group.InlineCount, group.BlockCount)
 					if group.InlineCount > 0 {
 						gid, _ := strconv.ParseInt(group.Id, 10, 64)
 						sendSelfDestroyMsg(tele.ChatID(gid), fmt.Sprintf("In the past `%d` hours, there are `%d` msgs handled by this bot\\.\nIn the `%d` inline msgs, there are:\n`%d` allowed\n`%d` blocked", hours, group.InlineCount+group.BlockCount+group.ChatCount, group.InlineCount+group.BlockCount, group.InlineCount, group.BlockCount), 6*time.Hour)
@@ -420,7 +428,21 @@ func inlineCooldownRoutine() {
 	}
 }
 
+var msgLog *log.Logger
+var timerLog *log.Logger
+var summaryLog *log.Logger
+
 func init() {
+	_, debug := os.LookupEnv("DEBUG")
+	if debug {
+		log.SetReportCaller(true)
+		log.SetLevel(log.DebugLevel)
+	}
+	log.SetTimeFormat(time.TimeOnly)
+	summaryLog = log.WithPrefix("on SUMMARY")
+	msgLog = log.WithPrefix("on msg")
+	timerLog = log.WithPrefix("on timer")
+
 	db, _ = scribble.New("../db", nil)
 	db.Read("test", "env", &testEnv)
 	inlineStats = make([]GroupStat, 0)
@@ -432,11 +454,17 @@ func init() {
 		botStat.LastSummarySentTime = time.Now().Add(-12 * time.Hour)
 		db.Write("data", "bot", &botStat)
 	}
+	var setup string
 	for k, v := range inlineStats {
 		if v.Setup.BurnoutLimit == 0 && v.Setup.CooldownMinutes == 0 {
 			inlineStats[k].Setup = gDefaultSetup
 		}
+		setup += fmt.Sprintf("%s: %d msg in %d min\n", v.Id, v.Setup.BurnoutLimit, v.Setup.CooldownMinutes)
+		for _, bot := range v.BotsSetup {
+			setup += fmt.Sprintf("    @%s: %d msg in %d min\n", bot.Id, bot.BurnoutLimit, bot.CooldownMinutes)
+		}
 	}
+	log.Info("Read setup", "Groups", setup)
 	if testEnv.Token != "" {
 		gToken = testEnv.Token
 		gRootID, _ = strconv.ParseInt(testEnv.AdminID, 10, 64)
@@ -446,7 +474,7 @@ func init() {
 		gRootID, _ = strconv.ParseInt(os.Getenv("BOT_ADMIN_ID"), 10, 64)
 		gKumaPushURL = os.Getenv("KUMA_PUSH_URL")
 	}
-	fmt.Printf("gToken:%s\ngRootID:%d\ngKumaPushURL:%s\n", gToken, gRootID, gKumaPushURL)
+	log.Debug("Read ENV", "gToken", gToken, "gRootID", gRootID, "gKumaPushURL", gKumaPushURL)
 	k := kuma.New(gKumaPushURL)
 	k.Start()
 }
@@ -575,13 +603,18 @@ func main() {
 	go oneSecondTimer()
 	go inlineCooldownRoutine()
 
-	fmt.Printf("[%s] bot online!\n", time.Now().Format(gTimeFormat))
+	log.Info("online")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, os.Interrupt, syscall.SIGTERM)
 	<-sc
 	bot.Stop()
-	fmt.Println("before shutdown, backup data")
-	db.Write("data", "inline", inlineStats)
+	log.Info("backup data")
+	err = db.Write("data", "inline", inlineStats)
+	if err != nil {
+		log.Error(err)
+	} else {
+		log.Info("data backup success")
+	}
 	<-time.After(time.Second * 1)
-	fmt.Println("bot offline!")
+	log.Info("offline")
 }
