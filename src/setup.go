@@ -12,13 +12,26 @@ import (
 const (
 	cmdHelp     string = "/help"
 	cmdHeatsink string = "/heatsink"
-	cmdSetup    string = `^/setup (\d+),\s?(\d+)$`
-	cmdBotLimit string = `^/botlimit (\d+),\s?(\d+)$`
+	cmdSetup    string = `^/setup(?: (\d+),\s?(\d+))?$`
+	cmdBotLimit string = `^/botlimit(?: (\d+),\s?(\d+))?$`
 )
 
 var cmdWithParamsHandlers = []func(g *GroupStat, c tele.Context) bool{
 	onSetup,
 	onBotLimit,
+}
+
+type cmdType int
+
+const (
+	Normal cmdType = iota
+	Regexp
+)
+
+type CMDs struct {
+	Type    cmdType
+	Content string
+	Handler func(g *GroupStat, c tele.Context) bool
 }
 
 func onSetupHelp(c tele.Context) error {
@@ -58,8 +71,17 @@ func onHelp(c tele.Context) error {
 	return sendSelfDestroyMsg(c.Recipient(), help, 300*time.Second)
 }
 
+func onHeatsink(c tele.Context) error {
+	gid := strconv.FormatInt(c.Chat().ID, 10)
+	gkey := findGroup(gid)
+	inlineStats[gkey].Heatsink()
+	_, err := bot.Reply(c.Message(), escape("Everyone's burnout count has been reset."), tele.ModeMarkdownV2)
+	errLog.Error("Reply to message", "err", err)
+	return err
+}
+
 func onSetup(g *GroupStat, c tele.Context) bool {
-	matchs := regexp.MustCompile(`^/setup(?: (\d+),\s?(\d+))?$`).FindStringSubmatch(c.Text())
+	matchs := regexp.MustCompile(cmdSetup).FindStringSubmatch(c.Text())
 	if len(matchs) > 0 {
 		if len(matchs[1]) == 0 || len(matchs[2]) == 0 {
 			onSetupHelp(c)
@@ -82,6 +104,43 @@ func onSetup(g *GroupStat, c tele.Context) bool {
 	}
 	return false
 }
+
+func onBotLimit(g *GroupStat, c tele.Context) bool {
+	matchs := regexp.MustCompile(cmdBotLimit).FindStringSubmatch(c.Text())
+	if len(matchs) > 0 {
+		if len(matchs[1]) == 0 || len(matchs[2]) == 0 || c.Message().ReplyTo == nil || c.Message().ReplyTo.Via == nil {
+			onBotLimitHelp(c)
+			return true
+		} else {
+			botName := c.Message().ReplyTo.Via.Username
+			burnout, err1 := strconv.Atoi(matchs[1])
+			cooldown, err2 := strconv.Atoi(matchs[2])
+			if err1 != nil || err2 != nil || ((burnout != 0 && cooldown != 0) &&
+				(burnout < gBotBurnoutLimitMin || burnout > gBotBurnoutLimitMax ||
+					cooldown < gBotCooldownMinutesMin || cooldown > gBotCooldownMinutesMax)) {
+				reply := escape(fmt.Sprintf("Invalid value.\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBotBurnoutLimitMin, gBotBurnoutLimitMax, gBotCooldownMinutesMin, gBotCooldownMinutesMax))
+				bot.Reply(c.Message(), reply, tele.ModeMarkdownV2)
+				return true
+			}
+			if burnout == 0 && cooldown == 0 {
+				g.RemoveBotSetup(botName)
+				bot.Reply(c.Message(), "Remove bot limit successful", tele.ModeMarkdownV2)
+			} else {
+				bs := g.FindBotSetup(botName)
+				if bs == nil {
+					g.NewBotSetup(botName, cooldown, burnout)
+				} else {
+					bs.CooldownMinutes = cooldown
+					bs.BurnoutLimit = burnout
+				}
+				bot.Reply(c.Message(), escape(fmt.Sprintf("Setup successful\nBot @%s's limit is set to %d messages in %d minutes", botName, burnout, cooldown)), tele.ModeMarkdownV2)
+			}
+			return true
+		}
+	}
+	return false
+}
+
 func (g *GroupStat) OnChatMsg(c tele.Context) error {
 	if hasPrivilege(c) {
 		for _, v := range cmdWithParamsHandlers {

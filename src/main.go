@@ -5,7 +5,6 @@ import (
 	"math"
 	"os"
 	"os/signal"
-	"regexp"
 	"strconv"
 	"syscall"
 	"time"
@@ -13,6 +12,7 @@ import (
 	_ "time/tzdata"
 
 	kuma "github.com/Nigh/kuma-push"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	scribble "github.com/nanobox-io/golang-scribble"
 	tele "gopkg.in/telebot.v3"
@@ -48,42 +48,6 @@ var (
 	gBotBurnoutLimitMin    int           = 1
 	gBotBurnoutLimitMax    int           = 1440
 )
-
-func onBotLimit(g *GroupStat, c tele.Context) bool {
-	matchs := regexp.MustCompile(`^/botlimit(?: (\d+),\s?(\d+))?$`).FindStringSubmatch(c.Text())
-	if len(matchs) > 0 {
-		if len(matchs[1]) == 0 || len(matchs[2]) == 0 || c.Message().ReplyTo == nil || c.Message().ReplyTo.Via == nil {
-			onBotLimitHelp(c)
-			return true
-		} else {
-			botName := c.Message().ReplyTo.Via.Username
-			burnout, err1 := strconv.Atoi(matchs[1])
-			cooldown, err2 := strconv.Atoi(matchs[2])
-			if err1 != nil || err2 != nil || ((burnout != 0 && cooldown != 0) &&
-				(burnout < gBotBurnoutLimitMin || burnout > gBotBurnoutLimitMax ||
-					cooldown < gBotCooldownMinutesMin || cooldown > gBotCooldownMinutesMax)) {
-				reply := escape(fmt.Sprintf("Invalid value.\n\nThe valid X value is from %d to %d, and the valid Y value is from %d to %d", gBotBurnoutLimitMin, gBotBurnoutLimitMax, gBotCooldownMinutesMin, gBotCooldownMinutesMax))
-				bot.Reply(c.Message(), reply, tele.ModeMarkdownV2)
-				return true
-			}
-			if burnout == 0 && cooldown == 0 {
-				g.RemoveBotSetup(botName)
-				bot.Reply(c.Message(), "Remove bot limit successful", tele.ModeMarkdownV2)
-			} else {
-				bs := g.FindBotSetup(botName)
-				if bs == nil {
-					g.NewBotSetup(botName, cooldown, burnout)
-				} else {
-					bs.CooldownMinutes = cooldown
-					bs.BurnoutLimit = burnout
-				}
-				bot.Reply(c.Message(), escape(fmt.Sprintf("Setup successful\nBot @%s's limit is set to %d messages in %d minutes", botName, burnout, cooldown)), tele.ModeMarkdownV2)
-			}
-			return true
-		}
-	}
-	return false
-}
 
 type MsgWithTimeout struct {
 	Msg  tele.StoredMessage `json:"msg"`
@@ -219,6 +183,7 @@ func inlineCooldownRoutine() {
 var msgLog *log.Logger
 var timerLog *log.Logger
 var summaryLog *log.Logger
+var errLog *log.Logger
 
 func init() {
 	_, debug := os.LookupEnv("DEBUG")
@@ -230,6 +195,24 @@ func init() {
 	summaryLog = log.WithPrefix("on SUMMARY")
 	msgLog = log.WithPrefix("on msg")
 	timerLog = log.WithPrefix("on timer")
+	errLog = log.NewWithOptions(os.Stderr, log.Options{
+		ReportTimestamp: true,
+		ReportCaller:    true,
+		TimeFormat:      "15:04:05.999999999",
+	})
+	styles := log.DefaultStyles()
+	styles.Levels[log.ErrorLevel] = lipgloss.NewStyle().
+		SetString("ERROR").
+		Padding(0, 1, 0, 1).
+		Background(lipgloss.Color("204")).
+		Foreground(lipgloss.Color("0"))
+	styles.Levels[log.FatalLevel] = lipgloss.NewStyle().
+		SetString("FATAL").
+		Padding(0, 1, 0, 1).
+		Background(lipgloss.Color("1")).
+		Foreground(lipgloss.Color("0"))
+
+	errLog.SetStyles(styles)
 
 	db, _ = scribble.New("../db", nil)
 	db.Read("test", "env", &testEnv)
@@ -278,15 +261,17 @@ func DirectCmdHandler(fn func(c tele.Context) error) func(c tele.Context) error 
 		return fn(c)
 	}
 }
-
-func onHeatsink(c tele.Context) error {
-	gid := strconv.FormatInt(c.Chat().ID, 10)
-	gkey := findGroup(gid)
-	inlineStats[gkey].Heatsink()
-	_, err := bot.Reply(c.Message(), escape("Everyone's burnout count has been reset."), tele.ModeMarkdownV2)
-	return err
+func PrivilegeMiddleWare(fn tele.HandlerFunc) tele.HandlerFunc {
+	return func(c tele.Context) error {
+		if c.Chat().Type == tele.ChatPrivate {
+			return c.Send("Command is only valid in a group.")
+		}
+		if !hasPrivilege(c) {
+			return replySelfDestroyMsg(c.Message(), escape("Only admins can use this command!"), 15*time.Second)
+		}
+		return fn(c)
+	}
 }
-
 func main() {
 	pref := tele.Settings{
 		Token:  gToken,
@@ -295,7 +280,7 @@ func main() {
 	var err error
 	bot, err = tele.NewBot(pref)
 	if err != nil {
-		log.Fatal(err)
+		errLog.Fatal(err)
 		return
 	}
 	for _, v := range []string{tele.OnText, tele.OnPhoto, tele.OnAnimation, tele.OnDocument, tele.OnSticker, tele.OnVideo, tele.OnVoice} {
@@ -304,8 +289,9 @@ func main() {
 	bot.Handle(tele.OnAddedToGroup, func(c tele.Context) error {
 		return c.Send("My pleasure to join the group! Inline messages will be limited by me.")
 	})
-	bot.Handle(cmdHelp, DirectCmdHandler(onHelp))
-	bot.Handle(cmdHeatsink, DirectCmdHandler(onHeatsink))
+
+	bot.Handle(cmdHelp, onHelp, PrivilegeMiddleWare)
+	bot.Handle(cmdHeatsink, onHeatsink, PrivilegeMiddleWare)
 	go bot.Start()
 	go oneSecondTimer()
 	go inlineCooldownRoutine()
@@ -318,7 +304,7 @@ func main() {
 	log.Info("backup data")
 	err = db.Write("data", "inline", inlineStats)
 	if err != nil {
-		log.Error(err)
+		errLog.Error(err)
 	} else {
 		log.Info("data backup success")
 	}
