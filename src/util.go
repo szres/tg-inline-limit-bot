@@ -1,10 +1,17 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 
 	tele "gopkg.in/telebot.v3"
 )
+
+func findGroupByContext(c tele.Context) *GroupStat {
+	gid := strconv.FormatInt(c.Chat().ID, 10)
+	gkey := findGroupByGid(gid)
+	return &groups[gkey]
+}
 
 func escape(s string) string {
 	var escapeList string = `_*[]()~` + "`" + `>#+-=|{}.!`

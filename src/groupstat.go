@@ -2,11 +2,8 @@ package main
 
 import (
 	"fmt"
-	"strconv"
-	"time"
 
 	"github.com/charmbracelet/log"
-	tele "gopkg.in/telebot.v3"
 )
 
 type User struct {
@@ -47,7 +44,7 @@ type GroupStat struct {
 	BotsSetup   []BotSetup `json:"botsetup"`
 }
 
-var inlineStats []GroupStat
+var groups []GroupStat
 
 func newGroup(gid string) GroupStat {
 	return GroupStat{
@@ -59,22 +56,24 @@ func newGroup(gid string) GroupStat {
 		Users:       make([]User, 0),
 	}
 }
-func findGroup(gid string) int {
-	for k, v := range inlineStats {
+func findGroupByGid(gid string) int {
+	for k, v := range groups {
 		if v.Id == gid {
 			return k
 		}
 	}
-	inlineStats = append(inlineStats, newGroup(gid))
-	return len(inlineStats) - 1
+	groups = append(groups, newGroup(gid))
+	return len(groups) - 1
 }
 
 func (g *GroupStat) NewUser(id string) {
 	g.Users = append(g.Users, User{Id: id, Count: 0, Cooldown: g.Setup.CooldownMinutes})
 	log.Debug(fmt.Sprintf("NewUser: %s, %d", id, g.Setup.CooldownMinutes))
 }
-
-func (g *GroupStat) FindBotSetup(name string) *BotSetup {
+func (g *GroupStat) GetUser(id string) *User {
+	return &g.Users[g.FindUser(id)]
+}
+func (g *GroupStat) GetBotSetup(name string) *BotSetup {
 	for i, v := range g.BotsSetup {
 		if v.Id == name {
 			return &g.BotsSetup[i]
@@ -104,7 +103,7 @@ func (g *GroupStat) FindUser(id string) int {
 	return len(g.Users) - 1
 }
 
-func (g *GroupStat) StatOnMsgType(t string) {
+func (g *GroupStat) MsgCount(t string) {
 	switch t {
 	case "inline":
 		g.InlineCount++
@@ -127,62 +126,40 @@ func (g *GroupStat) StatReset() {
 	g.ChatCount = 0
 	g.BlockCount = 0
 }
-func (g *GroupStat) StatOnMsg(c tele.Context) error {
-	uid := strconv.FormatInt(c.Sender().ID, 10)
-	uk := g.FindUser(uid)
-	if c.Message().Unixtime < time.Now().Unix()-60 {
-		// ignore old messages
-		return nil
+
+func (g *GroupStat) UserCountAdd(u *User) {
+	u.Count++
+	if u.Count == 1 {
+		u.Cooldown = g.Setup.CooldownMinutes
 	}
-	if c.Message().Via != nil {
-		var result string
-		var botsetup *BotSetup
-		if g.Users[uk].Count >= g.Setup.BurnoutLimit {
-			result = "[BURNED](USER)"
-			g.StatOnMsgType("block")
-			c.Delete()
-			name := fmt.Sprintf("[%s](tg://user?id=%d)", escape(fullName(c.Sender())), c.Sender().ID)
-			warning := escape(fmt.Sprintf("your inline message burned out! It may take significant time for resetting. %d minutes left.", g.Users[uk].Cooldown))
-			sendSelfDestroyMsg(c.Recipient(), name+", "+warning, gWarningTimeout)
-		} else {
-			botsetup = g.FindBotSetup(c.Message().Via.Username)
-			if botsetup != nil && botsetup.Count >= botsetup.BurnoutLimit {
-				result = "[BURNED](BOT)"
-				g.StatOnMsgType("block")
-				c.Delete()
-				name := botsetup.Id
-				warning := " burned out! It may take significant time for resetting."
-				if !botsetup.Warned {
-					warning += fmt.Sprintf(" Until %s.", time.Now().Add(time.Minute*time.Duration(botsetup.Cooldown)).Format("15:04"))
-					sendMsg(c.Recipient(), escape("Bot @"+name+warning))
-					botsetup.Warned = true
-				} else {
-					warning += fmt.Sprintf(" %d minutes left.", botsetup.Cooldown)
-					sendSelfDestroyMsg(c.Recipient(), escape("Bot @"+name+warning), gWarningTimeout)
-				}
-			} else {
-				g.Users[uk].Count++
-				if g.Users[uk].Count == 1 {
-					g.Users[uk].Cooldown = g.Setup.CooldownMinutes
-				}
-				result = "[ALLOWED]"
-				if botsetup != nil {
-					botsetup.Count++
-					if botsetup.Count == 1 {
-						botsetup.Cooldown = botsetup.CooldownMinutes
-					}
-				}
-				g.StatOnMsgType("inline")
-			}
-		}
-		details := fmt.Sprintf("Chat %s\nUser @%s:%d/%d", g.Id, g.Users[uk].Id, g.Users[uk].Count, g.Setup.BurnoutLimit)
-		if botsetup != nil {
-			details += fmt.Sprintf("\nBot @%s:%d/%d", botsetup.Id, botsetup.Count, botsetup.BurnoutLimit)
-		}
-		msgLog.Info(result, "detail", details)
-	} else {
-		g.StatOnMsgType("chat")
-		g.OnChatMsg(c)
+}
+func (g *GroupStat) IsUserBurned(u *User) bool {
+	return u.Count >= g.Setup.BurnoutLimit
+}
+
+func (b *BotSetup) CountAdd() {
+	b.Count++
+	if b.Count == 1 {
+		b.Cooldown = b.CooldownMinutes
 	}
-	return nil
+}
+
+func (g *GroupStat) IsBotBurned(name string) bool {
+	bk := g.GetBotSetup(name)
+	if bk == nil {
+		return false
+	}
+	return bk.Count >= bk.BurnoutLimit
+}
+
+func (g *GroupStat) BotWarn(name string) bool {
+	bk := g.GetBotSetup(name)
+	if bk == nil {
+		return true
+	}
+	if bk.Warned {
+		return true
+	}
+	bk.Warned = true
+	return false
 }
